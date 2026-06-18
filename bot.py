@@ -1,6 +1,5 @@
 # ============================================
-# HFSI RPG BOT - ПОЛНАЯ ВЕРСИЯ
-# ПЕРСОНА + ПЕРСОНАЖИ + КОМНАТЫ + АВТОУДАЛЕНИЕ + РЕДАКТОР + СБРОС + ГЕНЕРАЦИЯ МИРОВ + ГЕНЕРАЦИЯ ПЕРСОНАЖЕЙ + /regenerate
+# HFSI RPG BOT - ВЕРСИЯ ДЛЯ BOTHOST (POSTGRESQL)
 # ============================================
 
 import asyncio
@@ -19,12 +18,23 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 import openai
 
 # ============================================
-# 🔑 ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ (из Render/Bothost)
+# 🔑 ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ
 # ============================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 POLZA_API_KEY = os.getenv("POLZA_API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///hfsi_bot.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    print("❌ ОШИБКА: DATABASE_URL не задан!")
+    print("Добавь переменную DATABASE_URL в настройках Bothost.")
+    print("Пример: postgresql://user:pass@node1.pghost.ru:32773/dbname")
+    exit(1)
+
+if not BOT_TOKEN:
+    print("❌ ОШИБКА: BOT_TOKEN не задан!")
+    exit(1)
+
 POLZA_MODEL = os.getenv("POLZA_MODEL", "deepseek/deepseek-v4-flash")
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", 0))
 
@@ -156,16 +166,28 @@ class Checkpoint(Base):
     character = relationship('Character')
 
 # ============================================
-# БАЗА ДАННЫХ
+# БАЗА ДАННЫХ (PostgreSQL)
 # ============================================
 
-engine = create_async_engine(DATABASE_URL, echo=False, future=True)
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    future=True,
+    pool_pre_ping=True,
+    pool_size=5,
+    max_overflow=10
+)
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 async def init_db():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    print("✅ База данных инициализирована")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        print("✅ База данных инициализирована (PostgreSQL)")
+    except Exception as e:
+        print(f"❌ Ошибка подключения к БД: {e}")
+        print("Проверь DATABASE_URL в переменных окружения.")
+        raise
 
 async def get_db():
     async with AsyncSessionLocal() as session:
@@ -505,9 +527,7 @@ async def switch_room_by_name(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"✅ Переключено на комнату: **{room_name}**\n\nТеперь все действия будут в этой комнате.", parse_mode='Markdown')
         await main_menu(update, context)
 
-# ============================================
-# РЕДАКТОР ПЕРСОНАЖЕЙ
-# ============================================
+# ----- РЕДАКТОР ПЕРСОНАЖЕЙ -----
 
 async def character_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -634,9 +654,7 @@ character_edit_handler = ConversationHandler(
     fallbacks=[CommandHandler('cancel', lambda u,c: u.message.reply_text("❌ Отменено"))]
 )
 
-# ============================================
-# РЕДАКТОР МИРА
-# ============================================
+# ----- РЕДАКТОР МИРА -----
 
 async def world_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -900,9 +918,7 @@ async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         await handle_message(update, context)
 
-# ============================================
-# ПРОПУСК ПЕРСОНЫ
-# ============================================
+# ----- ПРОПУСК ПЕРСОНЫ -----
 
 async def persona_new_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -930,7 +946,6 @@ async def persona_skip_callback(update: Update, context: ContextTypes.DEFAULT_TY
         user.active_persona_id = None
         await session.commit()
     await query.edit_message_text("⏭️ **Персона пропущена**\n\nВы можете создать её позже через меню '👤 Моя персона'.", parse_mode='Markdown')
-    
     user_id = query.from_user.id
     user, persona = await get_active_persona(user_id)
     _, character = await get_active_character(user_id)
@@ -952,6 +967,8 @@ async def persona_create_callback(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
     await query.edit_message_text("👤 **Создание персоны**\n\n**Шаг 1 из 7:** Введите ваше **имя**:", parse_mode='Markdown')
     return PERSONA_NAME
+
+# ----- ПЕРСОНА (ВЫ) -----
 
 async def persona_new_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['persona_name'] = update.message.text
